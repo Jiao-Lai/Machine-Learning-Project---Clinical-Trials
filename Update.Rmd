@@ -1,0 +1,314 @@
+---
+title: "MachingLearningProject"
+author: "Jiao Lai"
+date: "3/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Step 0.1. Load and aggregate data
+```{r}
+library(dplyr)
+library(tidyverse)
+Study.A = read.csv("Study_A.csv")
+Study.B = read.csv("Study_B.csv")
+Study.C = read.csv("Study_C.csv")
+Study.D = read.csv("Study_D.csv")
+Study = rbind(Study.A, Study.B, Study.C, Study.D)
+Study$P <-
+  Study$P1 + Study$P2 + Study$P3 + Study$P4 + Study$P5 + Study$P6 + Study$P7
+Study$N <-
+  Study$N1 + Study$N2 + Study$N3 + Study$N4 + Study$N5 + Study$N6 + Study$N7
+Study$G <-
+  Study$G1 + Study$G2 + Study$G3 + Study$G4 + Study$G5 + Study$G6 + Study$G7 + Study$G8 + Study$G9 + Study$G10 + Study$G11 + Study$G12 + Study$G13 + Study$G14 + Study$G15 + Study$G16
+Study$Treatment[TxGroup == 'Control'] <- 0
+Study$Treatment[TxGroup == 'Treatment'] <- 1
+Study$Imp[VisitDay == 0] <- 0
+Study$Imp[VisitDay > 0] <- 1
+Study$flag[LeadStatus == 'Passed'] <- 0
+Study$flag[LeadStatus != 'Passed'] <- 1
+Study <- unique(Study)
+```
+Step 0.2. Drop unpredictive features: SiteID, RaterID, AssessmentiD, TxGroup, Study, LeadStatus.
+```{r}
+Study <- subset(Study, select = -c(SiteID, RaterID, AssessmentiD, TxGroup, Study, LeadStatus))
+Study <- unique(Study)
+```
+
+Step 0.3. Check and drop duplicates. 
+The duplicates happened because the same patient being assessed or reviewed multiple times on the same day. Since the scores are about the same, we can only keep one of them.
+
+```{r}
+Study.dup <-
+  Study %>% group_by(PatientID, VisitDay) %>% count() %>% filter(n > 1) %>% select(-n) %>% left_join(Study)
+Study.de_dup <-
+  Study.dup %>% group_by(PatientID, VisitDay) %>% filter(row_number() == 1)
+Study <-
+  Study %>% anti_join(Study.de_dup, by = c('PatientID', 'VisitDay'))
+Study <- bind_rows(Study, Study.de_dup)
+
+```
+Step 0.4. Fix 'Country' error. Check if there is missing data.
+```{r}
+unique(Study$Country)
+Country <-
+  Study %>% group_by(PatientID) %>% distinct(Country) %>% filter(Country != 'ERROR')
+Country_Error <-
+  Study %>% group_by(PatientID) %>% distinct(Country) %>% filter(Country == 'ERROR') %>% left_join(Country, by = 'PatientID')
+# Two patients with unknown Country information.
+Study$Country[Study$PatientID == '30040'] <- 'USA'
+Study <-
+  Study[!(Study$PatientID == '30177' | Study$PatientID == '30294'), ]
+Study[!complete.cases(Study), ]
+```
+Step 0.5. Summary data.
+```{r}
+summary(Study)
+plot(Study$PANSS_Total)
+plot(Study$P)
+plot(Study$N)
+plot(Study$G)
+```
+Objective 1. Detect treatment effect.
+Step 1.1. Extract day 0 observations, and last visit day observations.
+Only use valid assessment scores.
+```{r}
+Study.valid <- Study %>% filter(flag == 0)
+VisitDay.max = aggregate(VisitDay ~ PatientID, data = Study.valid, max)
+Study.Last = merge(Study.valid, VisitDay.max)
+Study.Last = Study.Last[Study.Last$VisitDay > 0, ]
+Study.Baseline = Study.valid[Study.valid$VisitDay == 0, ]
+patient.Last = Study.Last$PatientID
+patient.Baseline = Study.Baseline$PatientID
+Study.Baseline.TE = Study.Baseline[is.element(Study.Baseline$PatientID, t(patient.Last)), ]
+Study.Last.TE = Study.Last[is.element(Study.Last$PatientID, t(patient.Baseline)), ]
+Study.TE <-
+  Study.Baseline.TE %>% inner_join(Study.Last.TE, by = c('PatientID', 'Country', 'Treatment')) %>% select(
+    PatientID,
+    Country,
+    Treatment,
+    VisitDay.y,
+    PANSS_Total.x,
+    P.x,
+    N.x,
+    G.x,
+    P.y,
+    N.y,
+    G.y,
+    PANSS_Total.y
+  ) %>% mutate(diff_T = PANSS_Total.y - PANSS_Total.x) %>% mutate(diff_P = P.y - P.x) %>% mutate(diff_N = N.y - N.x) %>% mutate(diff_G = G.y - G.x) %>% mutate(VisitDay = VisitDay.y) %>% select(PatientID,
+                                                                                                                                                                                                 Country,
+                                                                                                                                                                                                 Treatment,
+                                                                                                                                                                                                 VisitDay,
+                                                                                                                                                                                                 diff_T,
+                                                                                                                                                                                                 diff_P,
+                                                                                                                                                                                                 diff_N,
+                                                                                                                                                                                                 diff_G)
+Study.TE$PatientID <- as.character(Study.TE$PatientID)
+
+```
+Step 1.2. Conduct Linear Regression.
+The results show the two groups are comparable, and there is no treatment effect on PANSS_Total, Positive, Negative, or General scores.
+```{r}
+lm.T = lm(diff_T ~ Treatment + Country, data = Study.TE)
+summary(lm.T)
+lm.P = lm(diff_P ~ Treatment + Country, data = Study.TE)
+summary(lm.P)
+lm.N = lm(diff_N ~ Treatment + Country, data = Study.TE)
+summary(lm.N)
+lm.G = lm(diff_G ~ Treatment + Country, data = Study.TE)
+summary(lm.G)
+lm.pre.T = lm(PANSS_Total ~ Treatment + Country, data = Study.Baseline.TE)
+summary(lm.pre.T)
+lm.pre.P = lm(PANSS_Total ~ Treatment + Country, data = Study.Baseline.TE)
+summary(lm.pre.P)
+lm.pre.N = lm(PANSS_Total ~ Treatment + Country, data = Study.Baseline.TE)
+summary(lm.pre.N)
+lm.pre.G = lm(PANSS_Total ~ Treatment + Country, data = Study.Baseline.TE)
+summary(lm.pre.G)
+lm.T.FilterByVisitDay = lm(diff_T ~ Treatment + Country, data = Study.TE[Study.TE$VisitDay > 120, ])
+summary(lm.T.FilterByVisitDay)
+lm.P.FilterByVisitDay = lm(diff_P ~ Treatment + Country, data = Study.TE[Study.TE$VisitDay > 120, ])
+summary(lm.P.FilterByVisitDay)
+lm.N.FilterByVisitDay = lm(diff_N ~ Treatment + Country, data = Study.TE[Study.TE$VisitDay > 120, ])
+summary(lm.N.FilterByVisitDay)
+lm.G.FilterByVisitDay = lm(diff_G ~ Treatment + Country, data = Study.TE[Study.TE$VisitDay > 120, ])
+summary(lm.G.FilterByVisitDay)
+```
+
+
+Objective 2. Patients segmentation.
+Step 2.1. Data pre-processing. Only use day 0 observations. Drop outliers.
+```{r}
+Study.Baseline = Study[Study$VisitDay == 0,]
+plot(Study.Baseline$PANSS_Total)
+plot(Study.Baseline$P)
+plot(Study.Baseline$N)
+plot(Study.Baseline$G)
+Study.Baseline = Study.Baseline[Study.Baseline$PANSS_Total<=120,]
+Study.Baseline = Study.Baseline[Study.Baseline$PANSS_Total>=60,]
+Study.Baseline = Study.Baseline[Study.Baseline$G>=25,]
+```
+Step 2.2. k-means clustering
+```{r}
+set.seed(3)
+km.out1 = kmeans(Study.Baseline[,4:33], 2, nstart = 25, iter.max = 500)
+km.out1
+km.out2 = kmeans(Study.Baseline[,4:33], 3, nstart = 25, iter.max = 500)
+km.out2
+km.out3 = kmeans(Study.Baseline[,4:33], 4, nstart = 25, iter.max = 500)
+km.out3
+km.out4 = kmeans(Study.Baseline[,4:33], 5, nstart = 25, iter.max = 500)
+km.out4
+```
+Step 2.3. Select optimal k = 3.
+```{r}
+km.out = kmeans(Study.Baseline[, 4:33], 3, nstart = 25, iter.max = 500)
+km.out
+cluster = km.out$cluster
+result = cbind(Study.Baseline, cluster)
+library(scatterD3)
+scatterD3(
+  data = result,
+  x = P,
+  y = N,
+  col_var = cluster,
+  size_var = G
+)
+```
+Goal 3. Last visit assessment score prediction.
+Step 3.1. Data pre-processing. Select last visit assessment, and second last visit assessment.
+```{r}
+G3.Last <-
+  Study.Last %>% select(PatientID, Country, VisitDay, PANSS_Total)
+G3._Last <-
+  Study.valid %>% anti_join(G3.Last, by = c('PatientID', 'VisitDay'))
+VisitDay.2ndmax = aggregate(VisitDay ~ PatientID, data = G3._Last, max)
+G3.2ndLast = merge(G3._Last, VisitDay.2ndmax)
+G3.Last <-
+  G3.Last %>% inner_join(G3.2ndLast, by = c('PatientID', 'Country')) %>% select(PatientID,
+                                                                                Country,
+                                                                                PANSS_Total.x,
+                                                                                PANSS_Total.y,
+                                                                                VisitDay.x,
+                                                                                VisitDay.y)
+
+```
+Step 3.2. Conduct linear regression.
+The results show that most recent score is highly predictive for last visit assessment scores.
+```{r}
+G3.v1 <-
+  G3.Last %>% filter(VisitDay.x - VisitDay.y <= 21) %>% filter(VisitDay.x > 120)
+lm.G3.v1 <-
+  lm(PANSS_Total.x ~ PANSS_Total.y + Country, data = G3.v1)
+summary(lm.G3.v1)
+G3.v2 <-
+  G3.Last %>% filter(VisitDay.x - VisitDay.y <= 14) %>% filter(VisitDay.x > 120)
+lm.G3.v2 <-
+  lm(PANSS_Total.x ~ PANSS_Total.y + Country, data = G3.v2)
+summary(lm.G3.v2)
+G3.v3 <-
+  G3.Last %>% filter(VisitDay.x - VisitDay.y <= 28) %>% filter(VisitDay.x > 120)
+lm.G3.v3 <-
+  lm(PANSS_Total.x ~ PANSS_Total.y + Country, data = G3.v3)
+summary(lm.G3.v3)
+```
+Step 3.3. Make forecasting.
+```{r}
+forecast = read.csv("Study_E.csv")
+# Apply linear regression on study.
+lm.G3.v3 <-
+  lm(PANSS_Total.x ~ PANSS_Total.y + Country, data = G3.v3)
+summary(lm.G3.v3)
+lm.pred = predict(lm.G3.v3, forecast)
+forecast$forecast_pred <- lm.pred
+```
+Goal 4. Classification
+Step 4.1. Data pre-processing.
+All observations are used for this task.
+Create column 'relavant_visit_day'.
+```{r}
+Study <-
+  Study %>% arrange(PatientID, VisitDay) %>% group_by(PatientID) %>% mutate(relevant_visit_day = row_number())
+Study
+Study_mean_byGroup <-
+  Study %>% select(VisitDay, PANSS_Total, P, N, G, relevant_visit_day, flag) %>% group_by(flag) %>% summarise(
+    mean_VisitDay = mean(VisitDay),
+    mean_PANSS_Total = mean(PANSS_Total),
+    mean_P = mean(P),
+    mean_N = mean(N),
+    mean_G = mean(G),
+    mean_relevant_visit_day = mean(relevant_visit_day)
+  )
+Study_var_byGroup <-
+  Study %>% select(VisitDay, PANSS_Total, P, N, G, relevant_visit_day, flag) %>% group_by(flag) %>% summarise(
+    var_VisitDay = var(VisitDay),
+    var_PANSS_Total = var(PANSS_Total),
+    var_P = var(P),
+    var_N = var(N),
+    var_G = var(G),
+    var_relevant_visit_day = var(relevant_visit_day)
+  )
+
+```
+Step 4.2. Build logistic regression.
+```{r}
+set.seed(123)
+train = sample(nrow(Study),
+               0.8 * nrow(Study),
+               replace = FALSE,
+               prob = NULL)
+test = -train
+Study.train = Study[train,]
+Study.test = Study[test,]
+glm.fit = glm(
+  flag ~ PANSS_Total + VisitDay + relevant_visit_day  + P + N + Treatment,
+  data = Study.train,
+  family = 'binomial'
+)
+summary(glm.fit)
+test.pred.prob = predict(glm.fit, Study.test, type = "response")
+test.pred <- ifelse(test.pred.prob > 0.5, 1, 0)
+mean(test.pred != Study.test$flag)
+table(test.pred, Study.test$flag)
+train.pred.prob = predict(glm.fit, Study.train, type = "response")
+train.pred <- ifelse(train.pred.prob > 0.5, 1, 0)
+mean(train.pred != Study.train$flag)
+```
+Step 4.3. Find optimal threshold.
+```{r}
+test.pred.prob = predict(glm.fit, Study.test, type = "response")
+thresholds = seq(0, 1, 0.01)
+best_accuracy = 0
+best_threshold = 0
+for (threshold in thresholds)
+{
+  test.pred <- ifelse(test.pred.prob > threshold, 1, 0)
+  accu = mean(test.pred == Study.test$flag)
+  if (accu > best_accuracy)
+  {
+    best_accuracy = accu
+    best_threshold = threshold
+  }
+}
+
+```
+Step 4.4. Make prediction.
+```{r}
+Study.E = read.csv("Study_E.csv")
+Study.E <-
+  Study.E %>% arrange(PatientID, VisitDay) %>% group_by(PatientID) %>% mutate(relevant_visit_day = row_number())
+Study.E$P <-
+  Study.E$P1 + Study.E$P2 + Study.E$P3 + Study.E$P4 + Study.E$P5 + Study.E$P6 + Study.E$P7
+Study.E$N <-
+  Study.E$N1 + Study.E$N2 + Study.E$N3 + Study.E$N4 + Study.E$N5 + Study.E$N6 + Study.E$N7
+Study.E$G <-
+  Study.E$G1 + Study.E$G2 + Study.E$G3 + Study.E$G4 + Study.E$G5 + Study.E$G6 + Study.E$G7 + Study.E$G8 + Study.E$G9 + Study.E$G10 + Study.E$G11 + Study.E$G12 + Study.E$G13 + Study.E$G14 + Study.E$G15 + Study.E$G16
+Study.E$Treatment <- ifelse(Study.E$TxGroup == 'Treatment', 1, 0)
+E.pred.prob = predict(glm.fit, Study.E, type = "response")
+Study.E$flag <- ifelse(E.pred.prob > best_threshold, 1, 0)
+
+```
